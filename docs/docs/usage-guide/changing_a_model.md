@@ -680,6 +680,25 @@ built-in defaults.
     for it and logs a warning rather than sending a request the provider would reject — use
     `enable_claude_adaptive_thinking` for those models instead.
 
+## Reasoning effort for custom OpenAI-compatible models
+
+```toml
+[config]
+reasoning_effort = "none"
+reasoning_effort_models_override = ["glm-5p3-flash", "kimi-k3"]
+```
+
+`config.reasoning_effort` is only forwarded to models in the built-in
+`SUPPORT_REASONING_EFFORT_MODELS` allowlist (see `pr_agent/algo/__init__.py`). OpenAI-compatible
+gateway models that are unknown to that list — for example Fireworks models served through the
+`openai/` prefix — silently ignore the setting. For thinking models this means a runaway thinking
+trace can consume the whole output budget and return an empty completion.
+
+Set `reasoning_effort_models_override` to a list of extra model ids (bare, like `"glm-5p3-flash"`,
+or as they appear in the model name with a `/` boundary before the id). Override entries extend the
+built-in allowlist; they do not replace it. When LiteLLM does not recognize the model, PR-Agent also
+sends `allowed_openai_params=["reasoning_effort"]` so the parameter survives.
+
 ## Output token limit
 
 ```toml

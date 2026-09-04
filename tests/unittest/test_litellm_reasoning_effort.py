@@ -10,17 +10,19 @@ import pr_agent.algo.ai_handlers.litellm_ai_handler as litellm_handler
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 
 
-def create_mock_settings(reasoning_effort_value):
+def create_mock_settings(reasoning_effort_value, extra_config=None):
     """Create a fake settings object with configurable reasoning_effort."""
+    extra_config = extra_config or {}
+    config = type('', (), {
+        'reasoning_effort': reasoning_effort_value,
+        'ai_timeout': 120,
+        'custom_reasoning_model': False,
+        'max_model_tokens': 32000,
+        'verbosity_level': 0,
+    })()
+    config.get = lambda key, default=None: extra_config.get(key, default)
     return type('', (), {
-        'config': type('', (), {
-            'reasoning_effort': reasoning_effort_value,
-            'ai_timeout': 120,
-            'custom_reasoning_model': False,
-            'max_model_tokens': 32000,
-            'verbosity_level': 0,
-            'get': lambda self, key, default=None: default
-        })(),
+        'config': config,
         'litellm': type('', (), {
             'get': lambda self, key, default=None: default
         })(),
@@ -1175,3 +1177,129 @@ class TestLiteLLMReasoningEffortGrok:
         )
 
         assert call_kwargs["extra_body"]["reasoning"] == {"effort": "high"}
+
+
+class TestReasoningEffortModelsOverride:
+    """Config-driven extension of SUPPORT_REASONING_EFFORT_MODELS.
+
+    OpenAI-compatible gateway models (e.g. Fireworks served via the openai/ prefix)
+    accept reasoning_effort but are unknown to the built-in allowlist, so a configured
+    effort is silently dropped and thinking models run unbounded. The
+    config.reasoning_effort_models_override list extends the allowlist.
+    """
+
+    def _isolate_env(self, monkeypatch):
+        for _var in ("AWS_USE_IMDS", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                     "AWS_SESSION_TOKEN", "AWS_REGION_NAME", "OPENAI_API_KEY"):
+            monkeypatch.delenv(_var, raising=False)
+
+    @pytest.mark.asyncio
+    async def test_override_extends_allowlist_for_custom_gateway_model(self, monkeypatch, mock_logger):
+        """A gateway-prefixed model matching the override receives the configured reasoning_effort."""
+        fake_settings = create_mock_settings(
+            "none", extra_config={"reasoning_effort_models_override": ["glm-5p3-flash", "kimi-k3"]}
+        )
+        monkeypatch.setattr(litellm_handler, "get_settings", lambda: fake_settings)
+        self._isolate_env(monkeypatch)
+
+        model = "openai/accounts/fireworks/models/glm-5p3-flash"
+        with patch('pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion', new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = create_mock_acompletion_response()
+
+            handler = LiteLLMAIHandler()
+            await handler.chat_completion(model=model, system="test system", user="test user")
+
+            call_kwargs = mock_completion.call_args[1]
+            assert call_kwargs["reasoning_effort"] == "none"
+            assert call_kwargs["model"] == model
+
+    @pytest.mark.asyncio
+    async def test_without_override_custom_gateway_model_gets_no_reasoning_effort(self, monkeypatch, mock_logger):
+        """Without the override, an unknown gateway model must not receive reasoning_effort."""
+        fake_settings = create_mock_settings("none")
+        monkeypatch.setattr(litellm_handler, "get_settings", lambda: fake_settings)
+        self._isolate_env(monkeypatch)
+
+        model = "openai/accounts/fireworks/models/glm-5p3-flash"
+        with patch('pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion', new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = create_mock_acompletion_response()
+
+            handler = LiteLLMAIHandler()
+            await handler.chat_completion(model=model, system="test system", user="test user")
+
+            call_kwargs = mock_completion.call_args[1]
+            assert "reasoning_effort" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_override_prefix_match_requires_slash_boundary(self, monkeypatch, mock_logger):
+        """Override entries match bare and provider-prefixed ids, but never substrings."""
+        fake_settings = create_mock_settings(
+            "low", extra_config={"reasoning_effort_models_override": ["glm-5p3-flash"]}
+        )
+        monkeypatch.setattr(litellm_handler, "get_settings", lambda: fake_settings)
+        self._isolate_env(monkeypatch)
+
+        matching = ["glm-5p3-flash", "openai/accounts/fireworks/models/glm-5p3-flash"]
+        for model in matching:
+            with patch('pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion', new_callable=AsyncMock) as mock_completion:
+                mock_completion.return_value = create_mock_acompletion_response()
+
+                handler = LiteLLMAIHandler()
+                await handler.chat_completion(model=model, system="test system", user="test user")
+
+                call_kwargs = mock_completion.call_args[1]
+                assert call_kwargs["reasoning_effort"] == "low", f"failed for {model}"
+
+        non_matching = ["openai/accounts/fireworks/models/my-glm-5p3-flash"]
+        for model in non_matching:
+            with patch('pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion', new_callable=AsyncMock) as mock_completion:
+                mock_completion.return_value = create_mock_acompletion_response()
+
+                handler = LiteLLMAIHandler()
+                await handler.chat_completion(model=model, system="test system", user="test user")
+
+                call_kwargs = mock_completion.call_args[1]
+                assert "reasoning_effort" not in call_kwargs, f"unexpected reasoning_effort for {model}"
+
+    @pytest.mark.asyncio
+    async def test_override_invalid_type_falls_back_to_builtin(self, monkeypatch, mock_logger):
+        """A non-list override is ignored with a warning; built-in behavior is preserved."""
+        fake_settings = create_mock_settings(
+            "high", extra_config={"reasoning_effort_models_override": "glm-5p3-flash"}
+        )
+        monkeypatch.setattr(litellm_handler, "get_settings", lambda: fake_settings)
+        self._isolate_env(monkeypatch)
+
+        with patch('pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion', new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = create_mock_acompletion_response()
+
+            handler = LiteLLMAIHandler()
+            await handler.chat_completion(model="openai/accounts/fireworks/models/glm-5p3-flash", system="s", user="u")
+
+            call_kwargs = mock_completion.call_args[1]
+            assert "reasoning_effort" not in call_kwargs
+        mock_logger.warning.assert_any_call(
+            "Invalid reasoning_effort_models_override in config; expected a list of model names. "
+            "Falling back to the built-in reasoning-effort model list."
+        )
+
+    @pytest.mark.asyncio
+    async def test_override_allows_openai_params_for_unknown_gateway_model(self, monkeypatch, mock_logger):
+        """Gateway-prefixed ids unknown to LiteLLM get allowed_openai_params so the effort survives."""
+        fake_settings = create_mock_settings(
+            "none", extra_config={"reasoning_effort_models_override": ["glm-5p3-flash"]}
+        )
+        monkeypatch.setattr(litellm_handler, "get_settings", lambda: fake_settings)
+        self._isolate_env(monkeypatch)
+
+        model = "openai/accounts/fireworks/models/glm-5p3-flash"
+        with patch('pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion', new_callable=AsyncMock) as mock_completion, \
+             patch('litellm.get_supported_openai_params', side_effect=Exception("unknown model")):
+            mock_completion.return_value = create_mock_acompletion_response()
+
+            handler = LiteLLMAIHandler()
+            await handler.chat_completion(model=model, system="s", user="u")
+
+            call_kwargs = mock_completion.call_args[1]
+            assert call_kwargs["reasoning_effort"] == "none"
+            assert call_kwargs["allowed_openai_params"] == ["reasoning_effort"]
