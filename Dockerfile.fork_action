@@ -1,0 +1,5 @@
+# Overlay for junoddev's GitHub Action: prebuilt image + our patched source.
+# The dockerhub image runs the source tree from /app/pr_agent (PYTHONPATH=/app),
+# so copying the branch's pr_agent over it activates fork changes without a full rebuild.
+FROM pragent/pr-agent:github_action
+COPY pr_agent /app/pr_agent
