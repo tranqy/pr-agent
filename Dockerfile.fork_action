@@ -1,5 +1,9 @@
 # Overlay for junoddev's GitHub Action: prebuilt image + our patched source.
 # The dockerhub image runs the source tree from /app/pr_agent (PYTHONPATH=/app),
 # so copying the branch's pr_agent over it activates fork changes without a full rebuild.
-FROM pragent/pr-agent:github_action
+#
+# Pinned to 0.45.0 by digest: this source tree was cut against that image, and
+# the moving :github_action tag (0.47.0, 2026-10-02) crashes it in
+# sort_files_by_main_languages (int vs str). Bump the pin with the source.
+FROM pragent/pr-agent:0.45.0-github_action@sha256:548b760b81ab4b3f729182428695ccc1194bbf87528c2b1e2b2b07e5223af7b6
 COPY pr_agent /app/pr_agent
